@@ -1,0 +1,56 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+
+  documents Document[]
+  queries   QueryLog[]
+}
+
+model Document {
+  id        String   @id @default(uuid())
+  userId    String
+  filename  String
+  s3Key     String
+  status    String   @default("PENDING")
+  pageCount Int?
+  createdAt DateTime @default(now())
+
+  user    User            @relation(fields: [userId], references: [id])
+  chunks  DocumentChunk[]
+  queries QueryLog[]
+}
+
+model DocumentChunk {
+  id         String   @id @default(uuid())
+  documentId String
+  chunkIndex Int
+  content    String
+  createdAt  DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+}
+
+model QueryLog {
+  id         String   @id @default(uuid())
+  userId     String
+  documentId String
+  question   String
+  answer     String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id])
+  document Document @relation(fields: [documentId], references: [id])
+}
