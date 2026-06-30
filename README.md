@@ -1,8 +1,8 @@
 # 📄 DocuMind API — Document Intelligence Backend
 
-A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users upload documents and query them using natural language. Built with a focus on scalability, async processing, and clean backend architecture.
+A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users upload PDF documents and query them using natural language. Built with a fully managed, free-tier cloud stack — no local infrastructure dependencies.
 
-> **Stack:** Node.js · Express · PostgreSQL · pgvector · Redis · BullMQ · MinIO · Ollama · Groq (LLaMA 3.3) · Docker · Prisma
+> **Stack:** Node.js · Express · PostgreSQL (Supabase + pgvector) · Redis (Upstash) · BullMQ · AWS S3 · Cohere (embeddings) · Groq/LLaMA 3.3 (LLM) · Prisma · Docker
 
 ---
 
@@ -28,27 +28,27 @@ A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users
           │ push job            │ semantic search
           ▼                     ▼
 ┌─────────────────┐   ┌─────────────────────┐
-│   Redis Queue   │   │  pgvector (postgres) │
-│    (BullMQ)     │   │  embedding storage  │
-└────────┬────────┘   └──────────┬──────────┘
-         │                       │
-         │ worker picks job      │ top-k chunks
-         ▼                       ▼
-┌─────────────────┐   ┌──────────────────────┐
-│ Document Worker │   │  Groq (LLaMA 3.3)    │
-│                 │   │  (AI answer gen)     │
-│ 1. Fetch from   │   └──────────────────────┘
-│    MinIO/S3     │
+│  Redis Queue    │   │  pgvector (Supabase) │
+│  (Upstash +     │   │  embedding storage   │
+│   BullMQ)       │   └──────────┬──────────┘
+└────────┬────────┘              │
+         │                       │ top-k chunks
+         │ worker picks job      ▼
+         ▼              ┌──────────────────────┐
+┌─────────────────┐     │  Groq (LLaMA 3.3 70B) │
+│ Document Worker │     │  (AI answer gen)      │
+│                 │     └──────────────────────┘
+│ 1. Fetch from   │
+│    AWS S3       │
 │ 2. Extract text │
-│ 3. Chunk text   │──────► pgvector
-│ 4. Embed chunks │◄────── Ollama (local)
-│    (Ollama)     │
-│ 5. Store meta   │──────► PostgreSQL
+│ 3. Chunk text   │──────► pgvector (Supabase)
+│ 4. Embed chunks │◄────── Cohere (hosted API)
+│ 5. Store meta   │──────► PostgreSQL (Supabase)
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│   MinIO / S3    │
+│     AWS S3      │
 │ (file storage)  │
 └─────────────────┘
 ```
@@ -65,18 +65,18 @@ User uploads PDF
 API validates (JWT + file type + size limit)
       │
       ▼
-File saved to MinIO/S3 → metadata saved to PostgreSQL (status: PENDING)
+File saved to AWS S3 → metadata saved to PostgreSQL (status: PENDING)
       │
       ▼
-Job pushed to Redis Queue (BullMQ)
+Job pushed to Redis Queue (BullMQ via Upstash)
       │
       ▼
 Worker picks up job:
-  → Fetch PDF from MinIO/S3
+  → Fetch PDF from S3
   → Extract text (pdfjs-dist)
   → Split into chunks (512 tokens, 50 token overlap)
-  → Generate embeddings (Ollama nomic-embed-text - runs locally)
-  → Store chunks + embeddings in pgvector
+  → Generate embeddings (Cohere embed-english-v3.0)
+  → Store chunks + embeddings in pgvector (Supabase)
   → Update document status: READY
 ```
 
@@ -91,7 +91,7 @@ API validates (JWT + rate limit via Redis)
 Check Redis cache (base64 query key, 1hr TTL)
       │
       ▼ (cache miss)
-Generate embedding for user question (Ollama)
+Generate embedding for user question (Cohere)
       │
       ▼
 pgvector cosine similarity search → top 5 chunks
@@ -117,9 +117,9 @@ documind-api/
 │
 ├── src/
 │   ├── config/
-│   │   ├── db.js              # PostgreSQL + Prisma client
-│   │   ├── redis.js           # Redis client (cache + BullMQ)
-│   │   ├── s3.js              # MinIO/S3 client
+│   │   ├── db.js              # PostgreSQL + Prisma client (adapter-based)
+│   │   ├── redis.js           # Redis clients (cache + BullMQ, separate connections)
+│   │   ├── s3.js               # AWS S3 client
 │   │   └── env.js             # Zod-validated env vars
 │   │
 │   ├── middleware/
@@ -148,7 +148,7 @@ documind-api/
 │   ├── workers/
 │   │   ├── documentWorker.js  # BullMQ worker (extract→chunk→embed)
 │   │   ├── chunker.js         # Text splitting logic
-│   │   └── embedder.js        # Ollama embeddings + pgvector ops
+│   │   └── embedder.js        # Cohere embeddings + pgvector raw SQL ops
 │   │
 │   ├── queues/
 │   │   └── documentQueue.js   # BullMQ queue definition
@@ -156,10 +156,11 @@ documind-api/
 │   └── app.js
 │
 ├── prisma/
-│   └── schema.prisma
+│   ├── schema.prisma
+│   └── migrations/
 │
-├── prisma.config.ts
-├── docker-compose.yml         # PostgreSQL + Redis + MinIO
+├── prisma.config.ts            # Datasource URL config (Prisma 7)
+├── docker-compose.yml          # Local dev only (Postgres/Redis/MinIO fallback)
 ├── Dockerfile
 ├── .env.example
 └── README.md
@@ -195,7 +196,7 @@ CREATE TABLE document_chunks (
   document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
   chunk_index INT NOT NULL,
   content     TEXT NOT NULL,
-  embedding   VECTOR(768),             -- nomic-embed-text via Ollama
+  embedding   VECTOR(1024),            -- Cohere embed-english-v3.0
   created_at  TIMESTAMP DEFAULT NOW()
 );
 
@@ -267,47 +268,52 @@ CREATE TABLE query_logs (
 | Layer | Technology | Why |
 |-------|-----------|-----|
 | Runtime | Node.js + Express | Fast I/O, familiar ecosystem |
-| Database | PostgreSQL + pgvector | Vector search without extra infra |
-| Queue | BullMQ + Redis | Async processing with retry logic |
-| Cache | Redis | Rate limiting + query result caching |
-| Storage | MinIO (S3-compatible) | Local S3, swap for AWS S3 in prod |
-| ORM | Prisma | Type-safe DB queries |
-| Embeddings | Ollama (nomic-embed-text) | Runs locally, zero cost |
-| LLM | Groq (LLaMA 3.3 70B) | Free tier, fast inference |
+| Database | PostgreSQL (Supabase) + pgvector | Managed Postgres with vector search built in, free tier |
+| Queue | BullMQ + Redis (Upstash) | Async processing with retry logic, serverless-friendly Redis |
+| Cache | Redis (Upstash) | Rate limiting + query result caching |
+| Storage | AWS S3 | Industry-standard object storage |
+| ORM | Prisma 7 (driver adapters) | Type-safe DB queries, pgbouncer-aware via direct/pooled URLs |
+| Embeddings | Cohere (embed-english-v3.0) | Free tier, hosted, no local GPU/runtime needed |
+| LLM | Groq (LLaMA 3.3 70B) | Free tier, very fast inference |
 | Auth | JWT + bcrypt | Stateless, secure |
 | Validation | Zod | Runtime schema validation |
-| Containers | Docker + docker-compose | One-command local setup |
+| Hosting | Render (free tier) | Persistent services for both API and worker |
 
 ---
 
 ## 🚀 Key Engineering Decisions
 
 **Why pgvector over Pinecone/Weaviate?**
-Keeps the stack simple — one less managed service. pgvector with cosine similarity handles semantic search efficiently and runs in the same PostgreSQL instance already used for metadata.
+Keeps the stack simple — one less managed service. pgvector with cosine similarity handles semantic search efficiently and runs in the same PostgreSQL instance already used for metadata. Supabase's free tier supports the `vector` extension out of the box.
 
 **Why BullMQ for processing?**
 Document processing (extraction → chunking → embedding) can take 10–30s and shouldn't block the upload response. BullMQ gives retry logic with exponential backoff, job status tracking, and concurrency control out of the box.
 
-**Why Ollama for embeddings?**
-Runs locally at zero cost. `nomic-embed-text` produces high-quality 768-dim embeddings competitive with OpenAI's `text-embedding-3-small`. Easy to swap for OpenAI in production.
+**Why Cohere for embeddings instead of OpenAI?**
+Fully hosted, free tier with no card required, and produces high-quality 1024-dim embeddings. Keeps the entire pipeline runnable with zero local dependencies (no self-hosted models), which matters for actually deploying this for free.
 
-**Why Redis for rate limiting?**
-Sliding window rate limiting needs atomic increment operations across requests. Redis `INCR` + `EXPIRE` makes this O(1) and avoids hitting the database.
+**Why Redis (Upstash) for rate limiting?**
+Sliding window rate limiting needs atomic increment operations across requests. Redis `INCR` + `EXPIRE` makes this O(1) and avoids hitting the database. Upstash's serverless pricing model means near-zero cost at low traffic.
 
 **Chunking strategy:**
 512 tokens per chunk with 50 token overlap. Overlap ensures context isn't lost at chunk boundaries — critical for accurate answers spanning multiple sections.
 
 **Why Groq?**
-Free tier with fast inference (LLaMA 3.3 70B). Architecture is LLM-agnostic — swap to Claude/GPT-4 by changing one service file.
+Free tier with very fast inference (LLaMA 3.3 70B). The query service is LLM-agnostic — swapping to Claude/GPT-4 in production only requires changing `query.service.js`.
+
+**Prisma 7 + connection pooling:**
+Supabase's transaction pooler (port 6543, pgbouncer mode) is used for app runtime queries, since it handles high concurrency well. Migrations run against the direct connection (port 5432) since `migrate deploy` requires features pgbouncer's transaction mode doesn't support.
 
 ---
 
-## 📦 Getting Started
+## 📦 Getting Started (Local Development)
 
 ### Prerequisites
 - Node.js 20+
-- Docker Desktop
-- Ollama (https://ollama.com)
+- A Supabase project (free tier, pgvector enabled)
+- An Upstash Redis database (free tier)
+- An AWS account with an S3 bucket
+- Free API keys: Cohere, Groq
 
 ### Setup
 
@@ -321,27 +327,17 @@ npm install
 
 # 3. Copy env file and fill in values
 cp .env.example .env
+# Fill in: DATABASE_URL, DIRECT_URL, REDIS_URL, AWS keys,
+# S3_BUCKET_NAME, COHERE_API_KEY, GROQ_API_KEY, JWT_SECRET
 
-# 4. Pull embedding model
-ollama pull nomic-embed-text
-
-# 5. Start PostgreSQL, Redis, MinIO
-docker-compose up -d
-
-# 6. Create MinIO bucket
-# Open http://localhost:9001 → login: minioadmin/minioadmin
-# Create bucket named: documind-uploads
-
-# 7. Run DB migrations
-npx prisma migrate dev
-
-# 8. Generate Prisma client
+# 4. Run DB migrations (uses direct connection)
+npx prisma migrate deploy
 npx prisma generate
 
-# 9. Start worker (Terminal 1)
+# 5. Start worker (Terminal 1)
 npm run worker
 
-# 10. Start API server (Terminal 2)
+# 6. Start API server (Terminal 2)
 npm run dev
 ```
 
@@ -365,9 +361,21 @@ Authorization: Bearer <token>
 
 ---
 
+## ☁️ Deployment
+
+Deployed as two persistent Render services from this repo:
+1. **API service** — `npm start`, handles HTTP requests
+2. **Worker service** — `npm run worker`, processes the document queue
+
+Both share the same environment variables (Supabase, Upstash, S3, Cohere, Groq credentials).
+
+> Free tier note: Render's free instances spin down after inactivity and may take ~30–60s to respond on the first request after idling.
+
+---
+
 ## 🔮 Planned Improvements
 - [ ] Support DOCX and TXT files
 - [ ] Multi-document querying
 - [ ] Streaming LLM responses via SSE
 - [ ] Admin dashboard with usage analytics
-- [ ] Swap Ollama → OpenAI embeddings for production
+- [ ] Distinguish query vs. document embedding input types in Cohere for improved retrieval quality

@@ -13,6 +13,7 @@ const envSchema = z.object({
   S3_BUCKET_NAME: z.string(),
   S3_ENDPOINT: z.string().optional(),
   GROQ_API_KEY: z.string(),
+  COHERE_API_KEY: z.string(),
 });
 
 const parsed = envSchema.safeParse(process.env);
