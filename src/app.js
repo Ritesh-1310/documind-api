@@ -13,8 +13,12 @@ const env = require('./config/env');
 const app = express();
 
 app.use(helmet());
-app.use(cors());
-app.use(morgan('dev'));
+app.use(cors({
+  origin: process.env.CLIENT_URL || '*',
+  credentials: true
+}));
+// app.use(morgan('dev'));
+app.use(morgan('combined'));
 app.use(express.json());
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -25,8 +29,10 @@ app.use('/api/query', queryRoutes);
 
 app.use(errorHandler);
 
-app.listen(env.PORT, () => {
-  console.log(`Server running on port ${env.PORT}`);
+const PORT = process.env.PORT || env.PORT || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
 module.exports = app;

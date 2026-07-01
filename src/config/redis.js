@@ -1,11 +1,14 @@
 const { Redis } = require('ioredis');
 const env = require('./env');
 
+const tlsConfig = env.REDIS_URL.startsWith('rediss://') ? { tls: {} } : {};
+
 // Default redis client (for caching, rate limiting)
-const redis = new Redis(env.REDIS_URL);
+const redis = new Redis(env.REDIS_URL, { ...tlsConfig });
 
 // BullMQ requires maxRetriesPerRequest: null
 const bullRedis = new Redis(env.REDIS_URL, {
+  ...tlsConfig,
   maxRetriesPerRequest: null,
 });
 
