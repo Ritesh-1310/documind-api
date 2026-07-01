@@ -2,7 +2,12 @@
 
 A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users upload PDF documents and query them using natural language. Built with a fully managed, free-tier cloud stack — no local infrastructure dependencies.
 
+> **Live API:** https://documind-api-x8ju.onrender.com  
+> **GitHub:** https://github.com/Ritesh-1310/documind-api
+
 > **Stack:** Node.js · Express · PostgreSQL (Supabase + pgvector) · Redis (Upstash) · BullMQ · AWS S3 · Cohere (embeddings) · Groq/LLaMA 3.3 (LLM) · Prisma · Docker
+
+> ⚠️ Hosted on Render free tier — may take 30–60s to respond after inactivity.
 
 ---
 
@@ -118,8 +123,8 @@ documind-api/
 ├── src/
 │   ├── config/
 │   │   ├── db.js              # PostgreSQL + Prisma client (adapter-based)
-│   │   ├── redis.js           # Redis clients (cache + BullMQ, separate connections)
-│   │   ├── s3.js               # AWS S3 client
+│   │   ├── redis.js           # Redis clients (cache + BullMQ, TLS-aware)
+│   │   ├── s3.js              # AWS S3 client
 │   │   └── env.js             # Zod-validated env vars
 │   │
 │   ├── middleware/
@@ -160,7 +165,8 @@ documind-api/
 │   └── migrations/
 │
 ├── prisma.config.ts            # Datasource URL config (Prisma 7)
-├── docker-compose.yml          # Local dev only (Postgres/Redis/MinIO fallback)
+├── start.js                    # Spawns API + Worker in single process
+├── docker-compose.yml          # Local dev (Postgres/Redis/MinIO)
 ├── Dockerfile
 ├── .env.example
 └── README.md
@@ -219,6 +225,8 @@ CREATE TABLE query_logs (
 
 ## 🔌 API Endpoints
 
+**Base URL:** `https://documind-api-x8ju.onrender.com`
+
 ### Auth
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -268,58 +276,59 @@ CREATE TABLE query_logs (
 | Layer | Technology | Why |
 |-------|-----------|-----|
 | Runtime | Node.js + Express | Fast I/O, familiar ecosystem |
-| Database | PostgreSQL (Supabase) + pgvector | Managed Postgres with vector search built in, free tier |
-| Queue | BullMQ + Redis (Upstash) | Async processing with retry logic, serverless-friendly Redis |
+| Database | PostgreSQL (Supabase) + pgvector | Managed Postgres with vector search, free tier |
+| Queue | BullMQ + Redis (Upstash) | Async processing with retry logic, serverless Redis |
 | Cache | Redis (Upstash) | Rate limiting + query result caching |
 | Storage | AWS S3 | Industry-standard object storage |
-| ORM | Prisma 7 (driver adapters) | Type-safe DB queries, pgbouncer-aware via direct/pooled URLs |
-| Embeddings | Cohere (embed-english-v3.0) | Free tier, hosted, no local GPU/runtime needed |
+| ORM | Prisma 7 (driver adapters) | Type-safe queries, pgbouncer-aware |
+| Embeddings | Cohere (embed-english-v3.0) | Free tier, hosted, 1024-dim vectors |
 | LLM | Groq (LLaMA 3.3 70B) | Free tier, very fast inference |
 | Auth | JWT + bcrypt | Stateless, secure |
 | Validation | Zod | Runtime schema validation |
-| Hosting | Render (free tier) | Persistent services for both API and worker |
+| Hosting | Render (free tier) | API + Worker in single Docker container |
 
 ---
 
 ## 🚀 Key Engineering Decisions
 
 **Why pgvector over Pinecone/Weaviate?**
-Keeps the stack simple — one less managed service. pgvector with cosine similarity handles semantic search efficiently and runs in the same PostgreSQL instance already used for metadata. Supabase's free tier supports the `vector` extension out of the box.
+Keeps the stack simple — one less managed service. pgvector runs in the same PostgreSQL instance already used for metadata. Supabase's free tier supports the `vector` extension out of the box.
 
 **Why BullMQ for processing?**
 Document processing (extraction → chunking → embedding) can take 10–30s and shouldn't block the upload response. BullMQ gives retry logic with exponential backoff, job status tracking, and concurrency control out of the box.
 
-**Why Cohere for embeddings instead of OpenAI?**
-Fully hosted, free tier with no card required, and produces high-quality 1024-dim embeddings. Keeps the entire pipeline runnable with zero local dependencies (no self-hosted models), which matters for actually deploying this for free.
+**Why Cohere for embeddings?**
+Fully hosted, free tier with no card required, produces high-quality 1024-dim embeddings. Keeps the entire pipeline deployable with zero local dependencies.
 
-**Why Redis (Upstash) for rate limiting?**
-Sliding window rate limiting needs atomic increment operations across requests. Redis `INCR` + `EXPIRE` makes this O(1) and avoids hitting the database. Upstash's serverless pricing model means near-zero cost at low traffic.
+**Why Redis for rate limiting?**
+Sliding window rate limiting needs atomic increment operations. Redis `INCR` + `EXPIRE` is O(1) and avoids hitting the database on every request.
 
 **Chunking strategy:**
 512 tokens per chunk with 50 token overlap. Overlap ensures context isn't lost at chunk boundaries — critical for accurate answers spanning multiple sections.
 
 **Why Groq?**
-Free tier with very fast inference (LLaMA 3.3 70B). The query service is LLM-agnostic — swapping to Claude/GPT-4 in production only requires changing `query.service.js`.
+Free tier with fast inference (LLaMA 3.3 70B). The query service is LLM-agnostic — swapping to Claude/GPT-4 in production only requires changing `query.service.js`.
 
 **Prisma 7 + connection pooling:**
-Supabase's transaction pooler (port 6543, pgbouncer mode) is used for app runtime queries, since it handles high concurrency well. Migrations run against the direct connection (port 5432) since `migrate deploy` requires features pgbouncer's transaction mode doesn't support.
+Supabase's transaction pooler (port 6543, pgbouncer) is used for runtime queries. Migrations run against the direct connection (port 5432) since `migrate deploy` requires features pgbouncer doesn't support.
+
+**Single-container deployment:**
+API and Worker run as separate Node.js child processes inside one Docker container via `start.js`. Keeps hosting on Render's free tier while maintaining process isolation and independent crash handling.
 
 ---
 
 ## 📦 Getting Started (Local Development)
 
 ### Prerequisites
-- Node.js 20+
-- A Supabase project (free tier, pgvector enabled)
-- An Upstash Redis database (free tier)
-- An AWS account with an S3 bucket
-- Free API keys: Cohere, Groq
+- Node.js 22+
+- Docker Desktop
+- Free accounts: Supabase, Upstash, AWS, Cohere, Groq
 
 ### Setup
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/yourusername/documind-api
+git clone https://github.com/Ritesh-1310/documind-api
 cd documind-api
 
 # 2. Install dependencies
@@ -327,18 +336,14 @@ npm install
 
 # 3. Copy env file and fill in values
 cp .env.example .env
-# Fill in: DATABASE_URL, DIRECT_URL, REDIS_URL, AWS keys,
-# S3_BUCKET_NAME, COHERE_API_KEY, GROQ_API_KEY, JWT_SECRET
 
-# 4. Run DB migrations (uses direct connection)
+# 4. Run DB migrations
 npx prisma migrate deploy
 npx prisma generate
 
-# 5. Start worker (Terminal 1)
-npm run worker
-
-# 6. Start API server (Terminal 2)
-npm run dev
+# 5. Start API + Worker
+npm run dev       # API only (Terminal 1)
+npm run worker    # Worker (Terminal 2)
 ```
 
 ### Test with Postman
@@ -353,6 +358,10 @@ POST /api/documents/upload
 Authorization: Bearer <token>
 Body: form-data → file (PDF)
 
+# Check status
+GET /api/documents/:id/status
+Authorization: Bearer <token>
+
 # Query
 POST /api/query
 Authorization: Bearer <token>
@@ -363,13 +372,19 @@ Authorization: Bearer <token>
 
 ## ☁️ Deployment
 
-Deployed as two persistent Render services from this repo:
-1. **API service** — `npm start`, handles HTTP requests
-2. **Worker service** — `npm run worker`, processes the document queue
+**Live:** https://documind-api-x8ju.onrender.com
 
-Both share the same environment variables (Supabase, Upstash, S3, Cohere, Groq credentials).
+Deployed as a single Docker container on Render free tier. `start.js` spawns both the Express API server and BullMQ worker as child processes, allowing both to run within Render's free single-instance limit.
 
-> Free tier note: Render's free instances spin down after inactivity and may take ~30–60s to respond on the first request after idling.
+**Cloud services used:**
+- **Render** — Docker container hosting (API + Worker)
+- **Supabase** — PostgreSQL + pgvector (free tier)
+- **Upstash** — Redis (free tier, serverless)
+- **AWS S3** — PDF file storage
+- **Cohere** — Embedding generation (free tier)
+- **Groq** — LLM inference / LLaMA 3.3 70B (free tier)
+
+> Free tier note: Render instances spin down after inactivity. First request after idle may take 30–60s.
 
 ---
 
