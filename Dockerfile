@@ -8,6 +8,7 @@ RUN npm ci --only=production
 COPY prisma ./prisma
 COPY prisma.config.ts ./
 COPY src ./src
+COPY start.js ./
 
 RUN npx prisma generate
 
