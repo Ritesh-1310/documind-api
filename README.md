@@ -2,12 +2,10 @@
 
 A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users upload PDF documents and query them using natural language. Built with a fully managed, free-tier cloud stack — no local infrastructure dependencies.
 
-> **Live API:** https://documind-api-x8ju.onrender.com  
+> **Live API:** https://documinds.duckdns.org  
 > **GitHub:** https://github.com/Ritesh-1310/documind-api
 
-> **Stack:** Node.js · Express · PostgreSQL (Supabase + pgvector) · Redis (Upstash) · BullMQ · AWS S3 · Cohere (embeddings) · Groq/LLaMA 3.3 (LLM) · Prisma · Docker
-
-> ⚠️ Hosted on Render free tier — may take 30–60s to respond after inactivity.
+> **Stack:** Node.js · Express · PostgreSQL (Supabase + pgvector) · Redis (Upstash) · BullMQ · AWS S3 · Cohere (embeddings) · Groq/LLaMA 3.3 (LLM) · Prisma · Docker · Nginx · AWS EC2
 
 ---
 
@@ -17,6 +15,11 @@ A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users
 ┌─────────────────────────────────────────────────────────────────┐
 │                        CLIENT / REST API                        │
 └───────────────────────────────┬─────────────────────────────────┘
+                                │
+                    ┌───────────▼───────────┐
+                    │     Nginx (port 80/443)│
+                    │     Reverse Proxy      │
+                    └───────────┬───────────┘
                                 │
                     ┌───────────▼───────────┐
                     │     API Gateway        │
@@ -40,8 +43,8 @@ A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users
          │                       │ top-k chunks
          │ worker picks job      ▼
          ▼              ┌──────────────────────┐
-┌─────────────────┐     │  Groq (LLaMA 3.3 70B) │
-│ Document Worker │     │  (AI answer gen)      │
+┌─────────────────┐     │  Groq (LLaMA 3.3 70B)│
+│ Document Worker │     │  (AI answer gen)     │
 │                 │     └──────────────────────┘
 │ 1. Fetch from   │
 │    AWS S3       │
@@ -65,6 +68,9 @@ A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users
 ### Upload Flow
 ```
 User uploads PDF
+      │
+      ▼
+Nginx reverse proxy (port 80/443 → 3000)
       │
       ▼
 API validates (JWT + file type + size limit)
@@ -225,7 +231,7 @@ CREATE TABLE query_logs (
 
 ## 🔌 API Endpoints
 
-**Base URL:** `https://documind-api-x8ju.onrender.com`
+**Base URL:** `https://documinds.duckdns.org`
 
 ### Auth
 | Method | Endpoint | Description |
@@ -279,13 +285,16 @@ CREATE TABLE query_logs (
 | Database | PostgreSQL (Supabase) + pgvector | Managed Postgres with vector search, free tier |
 | Queue | BullMQ + Redis (Upstash) | Async processing with retry logic, serverless Redis |
 | Cache | Redis (Upstash) | Rate limiting + query result caching |
-| Storage | AWS S3 | Industry-standard object storage |
+| Storage | AWS S3 (ap-south-1) | Industry-standard object storage |
 | ORM | Prisma 7 (driver adapters) | Type-safe queries, pgbouncer-aware |
 | Embeddings | Cohere (embed-english-v3.0) | Free tier, hosted, 1024-dim vectors |
 | LLM | Groq (LLaMA 3.3 70B) | Free tier, very fast inference |
 | Auth | JWT + bcrypt | Stateless, secure |
 | Validation | Zod | Runtime schema validation |
-| Hosting | Render (free tier) | API + Worker in single Docker container |
+| Compute | AWS EC2 t3.micro (ap-south-1) | Always-on, no cold starts |
+| Reverse Proxy | Nginx | Port 80/443 → 3000, SSL termination |
+| SSL | Let's Encrypt (Certbot) | Free, auto-renewing HTTPS |
+| DNS | DuckDNS | Free custom subdomain |
 
 ---
 
@@ -313,7 +322,10 @@ Free tier with fast inference (LLaMA 3.3 70B). The query service is LLM-agnostic
 Supabase's transaction pooler (port 6543, pgbouncer) is used for runtime queries. Migrations run against the direct connection (port 5432) since `migrate deploy` requires features pgbouncer doesn't support.
 
 **Single-container deployment:**
-API and Worker run as separate Node.js child processes inside one Docker container via `start.js`. Keeps hosting on Render's free tier while maintaining process isolation and independent crash handling.
+API and Worker run as separate Node.js child processes inside one Docker container via `start.js`. Keeps the deployment simple while maintaining process isolation and independent crash handling.
+
+**Nginx as reverse proxy:**
+Nginx handles SSL termination, port forwarding (80/443 → 3000), and can be extended with rate limiting or load balancing at the infrastructure level without changing application code.
 
 ---
 
@@ -341,9 +353,11 @@ cp .env.example .env
 npx prisma migrate deploy
 npx prisma generate
 
-# 5. Start API + Worker
-npm run dev       # API only (Terminal 1)
-npm run worker    # Worker (Terminal 2)
+# 5. Start worker (Terminal 1)
+npm run worker
+
+# 6. Start API server (Terminal 2)
+npm run dev
 ```
 
 ### Test with Postman
@@ -372,19 +386,74 @@ Authorization: Bearer <token>
 
 ## ☁️ Deployment
 
-**Live:** https://documind-api-x8ju.onrender.com
+**Live:** https://documinds.duckdns.org
 
-Deployed as a single Docker container on Render free tier. `start.js` spawns both the Express API server and BullMQ worker as child processes, allowing both to run within Render's free single-instance limit.
+Deployed on **AWS EC2 (t3.micro, ap-south-1 Mumbai)** with Docker, Nginx reverse proxy, and Let's Encrypt SSL.
 
-**Cloud services used:**
-- **Render** — Docker container hosting (API + Worker)
-- **Supabase** — PostgreSQL + pgvector (free tier)
-- **Upstash** — Redis (free tier, serverless)
-- **AWS S3** — PDF file storage
-- **Cohere** — Embedding generation (free tier)
-- **Groq** — LLM inference / LLaMA 3.3 70B (free tier)
+### Infrastructure
+- **Compute:** AWS EC2 t3.micro — Ubuntu 26.04 LTS, always-on, no cold starts
+- **Reverse Proxy:** Nginx proxies port 80/443 → Docker container on port 3000
+- **SSL:** Let's Encrypt via Certbot (auto-renewing every 90 days)
+- **DNS:** DuckDNS (`documinds.duckdns.org` → EC2 public IP)
+- **Container:** Single Docker container running API + Worker via `start.js`
+- **Restart policy:** `--restart unless-stopped` — survives crashes and instance reboots
 
-> Free tier note: Render instances spin down after inactivity. First request after idle may take 30–60s.
+### Cloud Services
+| Service | Provider | Purpose |
+|---------|----------|---------|
+| Compute | AWS EC2 (ap-south-1) | API + Worker hosting |
+| Database | Supabase (PostgreSQL + pgvector) | Data + vector storage |
+| Cache + Queue | Upstash Redis | Rate limiting, caching, job queue |
+| File Storage | AWS S3 (ap-south-1) | PDF uploads |
+| Embeddings | Cohere | Vector embedding generation |
+| LLM | Groq (LLaMA 3.3 70B) | AI answer generation |
+
+### Deployment Steps
+
+```bash
+# 1. SSH into EC2
+ssh -i documind-key.pem ubuntu@<EC2-IP>
+
+# 2. Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker ubuntu
+
+# 3. Clone and configure
+git clone https://github.com/Ritesh-1310/documind-api.git
+cd documind-api
+nano .env  # add all environment variables (no quotes around values)
+
+# 4. Build and run container
+docker build -t documind-api .
+docker run -d --name documind --env-file .env -p 3000:3000 --restart unless-stopped documind-api
+
+# 5. Set up Nginx
+sudo apt install nginx -y
+sudo nano /etc/nginx/sites-available/documind
+# add proxy config, then:
+sudo ln -s /etc/nginx/sites-available/documind /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl restart nginx
+
+# 6. SSL with Let's Encrypt
+sudo apt install certbot python3-certbot-nginx -y
+sudo certbot --nginx -d documinds.duckdns.org
+
+# 7. Verify
+curl https://documinds.duckdns.org/health
+```
+
+### Update Deployment
+
+```bash
+# SSH in, pull latest code, rebuild
+ssh -i documind-key.pem ubuntu@<EC2-IP>
+cd documind-api
+git pull
+docker stop documind && docker rm documind
+docker build -t documind-api .
+docker run -d --name documind --env-file .env -p 3000:3000 --restart unless-stopped documind-api
+```
 
 ---
 
@@ -393,4 +462,4 @@ Deployed as a single Docker container on Render free tier. `start.js` spawns bot
 - [ ] Multi-document querying
 - [ ] Streaming LLM responses via SSE
 - [ ] Admin dashboard with usage analytics
-- [ ] Distinguish query vs. document embedding input types in Cohere for improved retrieval quality
+- [ ] CI/CD pipeline (GitHub Actions → auto-deploy to EC2 on push)
