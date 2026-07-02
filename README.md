@@ -1,11 +1,11 @@
 # 📄 DocuMind API — Document Intelligence Backend
 
-A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users upload PDF documents and query them using natural language. Built with a fully managed, free-tier cloud stack — no local infrastructure dependencies.
+A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users upload PDF documents and query them using natural language. Built with a fully managed cloud stack deployed on AWS EC2.
 
 > **Live API:** https://documinds.duckdns.org  
 > **GitHub:** https://github.com/Ritesh-1310/documind-api
 
-> **Stack:** Node.js · Express · PostgreSQL (Supabase + pgvector) · Redis (Upstash) · BullMQ · AWS S3 · Cohere (embeddings) · Groq/LLaMA 3.3 (LLM) · Prisma · Docker · Nginx · AWS EC2
+> **Stack:** Node.js · Express · PostgreSQL (Supabase + pgvector) · Redis (Upstash) · BullMQ · AWS S3 · Cohere (embeddings) · Groq/LLaMA 3.3 (LLM) · Prisma · Docker · Nginx · AWS EC2 · GitHub Actions
 
 ---
 
@@ -17,7 +17,7 @@ A production-ready RAG (Retrieval-Augmented Generation) pipeline that lets users
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
                     ┌───────────▼───────────┐
-                    │     Nginx (port 80/443)│
+                    │   Nginx (port 80/443)  │
                     │     Reverse Proxy      │
                     └───────────┬───────────┘
                                 │
@@ -126,6 +126,10 @@ Return answer + source chunks + similarity scores
 ```
 documind-api/
 │
+├── .github/
+│   └── workflows/
+│       └── deploy.yml         # GitHub Actions CI/CD
+│
 ├── src/
 │   ├── config/
 │   │   ├── db.js              # PostgreSQL + Prisma client (adapter-based)
@@ -233,6 +237,12 @@ CREATE TABLE query_logs (
 
 **Base URL:** `https://documinds.duckdns.org`
 
+### Landing
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | API info, endpoints, stack overview |
+| GET | `/health` | Health check |
+
 ### Auth
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -295,6 +305,7 @@ CREATE TABLE query_logs (
 | Reverse Proxy | Nginx | Port 80/443 → 3000, SSL termination |
 | SSL | Let's Encrypt (Certbot) | Free, auto-renewing HTTPS |
 | DNS | DuckDNS | Free custom subdomain |
+| CI/CD | GitHub Actions | Auto-deploy to EC2 on push to main |
 
 ---
 
@@ -325,7 +336,7 @@ Supabase's transaction pooler (port 6543, pgbouncer) is used for runtime queries
 API and Worker run as separate Node.js child processes inside one Docker container via `start.js`. Keeps the deployment simple while maintaining process isolation and independent crash handling.
 
 **Nginx as reverse proxy:**
-Nginx handles SSL termination, port forwarding (80/443 → 3000), and can be extended with rate limiting or load balancing at the infrastructure level without changing application code.
+Nginx handles SSL termination and port forwarding (80/443 → 3000). Can be extended with rate limiting or load balancing at the infrastructure level without changing application code.
 
 ---
 
@@ -408,7 +419,28 @@ Deployed on **AWS EC2 (t3.micro, ap-south-1 Mumbai)** with Docker, Nginx reverse
 | Embeddings | Cohere | Vector embedding generation |
 | LLM | Groq (LLaMA 3.3 70B) | AI answer generation |
 
-### Deployment Steps
+### CI/CD Pipeline
+
+Auto-deployment via **GitHub Actions** — every push to `main` triggers:
+
+1. SSH into EC2
+2. `git pull` latest code
+3. Stop and remove existing container
+4. Rebuild Docker image
+5. Run new container
+
+```yaml
+# .github/workflows/deploy.yml
+on:
+  push:
+    branches: [main]
+```
+
+> Secrets stored in GitHub → Settings → Secrets: `EC2_HOST`, `EC2_SSH_KEY`
+
+No manual deployment needed after initial setup.
+
+### Manual Deployment Steps
 
 ```bash
 # 1. SSH into EC2
@@ -431,28 +463,12 @@ docker run -d --name documind --env-file .env -p 3000:3000 --restart unless-stop
 # 5. Set up Nginx
 sudo apt install nginx -y
 sudo nano /etc/nginx/sites-available/documind
-# add proxy config, then:
 sudo ln -s /etc/nginx/sites-available/documind /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
 
 # 6. SSL with Let's Encrypt
 sudo apt install certbot python3-certbot-nginx -y
 sudo certbot --nginx -d documinds.duckdns.org
-
-# 7. Verify
-curl https://documinds.duckdns.org/health
-```
-
-### Update Deployment
-
-```bash
-# SSH in, pull latest code, rebuild
-ssh -i documind-key.pem ubuntu@<EC2-IP>
-cd documind-api
-git pull
-docker stop documind && docker rm documind
-docker build -t documind-api .
-docker run -d --name documind --env-file .env -p 3000:3000 --restart unless-stopped documind-api
 ```
 
 ---
@@ -462,4 +478,4 @@ docker run -d --name documind --env-file .env -p 3000:3000 --restart unless-stop
 - [ ] Multi-document querying
 - [ ] Streaming LLM responses via SSE
 - [ ] Admin dashboard with usage analytics
-- [ ] CI/CD pipeline (GitHub Actions → auto-deploy to EC2 on push)
+- [x] CI/CD pipeline (GitHub Actions → auto-deploy to EC2 on push to main)
