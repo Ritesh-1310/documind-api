@@ -28,7 +28,7 @@ jobs:
             docker build -t documind-api .
             docker run -d --name documind \
               --env-file .env \
-              -p 3000:3000 \
+              --network host \
               --restart unless-stopped \
               documind-api
             echo "Deployed successfully"
